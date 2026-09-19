@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://itvycmjexbabhvzqltdo.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Cuentas">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -280,11 +281,17 @@ tr:last-child td{border-bottom:0}
 .rule code{background:var(--card-2);padding:2px 7px;border-radius:6px;font-size:12.5px}
 .linkbtn{border:0;background:transparent;color:var(--ink-3);font-size:13px;text-decoration:underline;padding:4px}
 .danger{color:var(--danger)}
+.authbox{max-width:400px;margin:0 auto;padding:calc(9vh + env(safe-area-inset-top)) 16px 40px}
+.authtitle{font-family:var(--display);font-weight:700;font-size:34px;letter-spacing:-.03em;margin:0 0 18px;text-align:center}
+.authbox input[type=email],.authbox input[type=password]{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+.authmsg{margin:0 0 12px}
+.authmsg.bad{color:var(--danger)}
+.authmsg.ok{color:var(--good)}
 .hidden{display:none !important}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="app">
   <header class="top">
     <div class="brand">
       <h1>Cuentas</h1>
@@ -302,10 +309,12 @@ tr:last-child td{border-bottom:0}
   <main id="view"></main>
 </div>
 
-<button class="fab" id="fab">+ Gasto</button>
+<div id="auth" class="hidden"></div>
+<button class="fab hidden" id="fab">+ Gasto</button>
 <div id="sheet"></div>
 <div id="toast"></div>
 
+<script src="vendor/supabase-2.116.0.js"></script>
 <script>
 "use strict";
 window.addEventListener("error", function(ev){
@@ -406,6 +415,14 @@ function toast(msg){
 
 /* ---------- render ---------- */
 function render(){
+  const inApp = authState==="in";
+  document.getElementById("app").classList.toggle("hidden", !inApp);
+  document.getElementById("auth").classList.toggle("hidden", inApp);
+  if(!inApp){
+    document.getElementById("fab").classList.add("hidden");
+    renderAuth();
+    return;
+  }
   const parts = [];
   if(S.tx.length) parts.push(S.tx.length+" movimientos");
   parts.push(syncLabel(syncState));
@@ -903,13 +920,18 @@ function viewAjustes(){
   let catopts = "";
   S.cats.forEach(c=>{ catopts += '<option value="'+c.id+'">'+esc(c.name)+'</option>'; });
 
-  const dataNote = storeMode==="db"
-    ? "Se guardan solos en tu cuenta y siguen aquí la próxima vez que abras el enlace, desde el iPhone o desde el ordenador. La copia exportada es tu red de seguridad extra."
-    : storeMode==="local"
-      ? "Se guardan en este navegador, así que solo los verás en este dispositivo. Exporta una copia de vez en cuando."
-      : "Este navegador no ofrece almacenamiento persistente, así que los datos solo viven en esta sesión. Exporta una copia antes de cerrar.";
+  const dataNote = "Se guardan en tu cuenta y en este dispositivo. Puedes usar la app sin conexión: los cambios se suben solos cuando vuelva la red. Solo tú ves tus datos. Exporta una copia de vez en cuando como red de seguridad.";
 
   return '<div class="card">'+
+    '<h2 style="margin:0 0 6px;font-size:17px">Tu cuenta</h2>'+
+    '<p class="note">Sesión iniciada como <b>'+esc(userEmail)+'</b>.</p>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">'+
+      '<button class="btn sm ghost" id="syncnow">Sincronizar ahora</button>'+
+      '<button class="btn sm ghost" id="logout">Cerrar sesión</button>'+
+    '</div>'+
+  '</div>'+
+
+  '<div class="card" style="margin-top:14px">'+
     '<h2 style="margin:0 0 12px;font-size:17px">Límite de gasto mensual</h2>'+
     '<div style="display:flex;gap:10px"><input type="number" id="budget" inputmode="decimal" placeholder="Sin límite" value="'+(S.budget||"")+'" style="flex:1">'+
     '<button class="btn" id="savebudget">Guardar</button></div>'+
@@ -1197,6 +1219,10 @@ async function wipeAll(){
     keys.add(K_SET);
     for(const k of keys){ try{ await store.delete(k); }catch(e){} }
     snapshot = {};
+    if(store.push){
+      try{ await store.push(); }
+      catch(e){ setSync("pending"); return; }
+    }
     setSync("ok");
   }catch(e){ setSync("err"); }
 }
@@ -1317,6 +1343,8 @@ function wire(){
     };
     r.readAsText(f);
   };
+  const lo=document.getElementById("logout"); if(lo) lo.onclick=doLogout;
+  const sn=document.getElementById("syncnow"); if(sn) sn.onclick=()=>syncNow(true);
   const w=document.getElementById("wipe");
   if(w) w.onclick=()=>askConfirm(
     "Borrar todo",
@@ -1346,27 +1374,43 @@ document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
 document.getElementById("fab").onclick=()=>openSheet(null);
 document.addEventListener("keydown",e=>{ if(e.key==="Escape"&&draft) closeSheet(); });
 
-/* ---------- almacenamiento persistente ---------- */
+/* ---------- almacenamiento: caché en el dispositivo + nube (Supabase) ---------- */
 const PREFIX = "cuentas:month:";
 const K_SET  = "cuentas:settings";
 const K_MONTH = m => PREFIX + m;
 
+const SUPABASE_URL = "https://itvycmjexbabhvzqltdo.supabase.co";
+/* Clave pública (anon). No es un secreto: la protección real son las reglas RLS de la base de datos. */
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml0dnljbWpleGJhYmh2enFsdGRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4MjkyMTIsImV4cCI6MjEwNTQwNTIxMn0.-2zJGyN0JuOtCib5YscryfDquToDFzcrnxpzKvJHujE";
+const AUTH_KEY = "cuentas-auth";
+
 const SYNC_LABEL = {
   wait:"Cargando…",
-  saving:"Guardando…",
+  saving:"Sincronizando…",
   err:"No se ha podido guardar",
-  off:"Solo en esta sesión"
+  off:"Solo en esta sesión",
+  pending:"Sin conexión · pendiente de subir",
+  offline:"Sin conexión"
 };
 function syncLabel(s){
-  if(s==="ok") return storeMode==="db" ? "Guardado en tu cuenta" : "Guardado en este dispositivo";
+  if(s==="ok") return storeMode==="cloud" ? "Sincronizado con tu cuenta" : "Guardado en este dispositivo";
   return SYNC_LABEL[s] || "";
 }
 let syncState = "wait";
 let loading = true;
-let storeMode = "none";     // "db" | "local" | "none"
+let storeMode = "none";     // "cloud" | "none"
 let store = null;
 let saveT = null;
-let snapshot = {};   // clave -> último texto escrito
+let snapshot = {};   // clave -> último texto leído o escrito
+
+/* estado de la sesión */
+let sb = null;
+let userId = null, userEmail = "";
+let authState = "loading";   // loading | login | forgot | setpw | in
+let authMsg = "", authMsgOk = false, authBusy = false, authEmail = "";
+const HASH = new URLSearchParams(location.hash.replace(/^#/,""));
+let needPw = ["recovery","invite"].indexOf(HASH.get("type")) > -1;   // llega desde un enlace del correo
+const hashErr = !!HASH.get("error_description");                       // enlace caducado o ya usado
 
 function setSync(s){
   if(syncState===s) return;
@@ -1382,56 +1426,71 @@ function setSync(s){
 function monthsOf(tx){ return [...new Set(tx.map(t=>t.date.slice(0,7)))]; }
 function serialize(tx){ return JSON.stringify(tx.slice().sort((a,b)=>a.id<b.id?-1:1)); }
 
-/* adaptador sobre la base de datos del artifact */
-function dbStore(db){
-  const SET_PATH = "ajustes/config";
-  const pathFor = k => k===K_SET ? SET_PATH : "meses/"+k.slice(PREFIX.length);
-  return {
-    async get(k){
-      const s = await db.doc(pathFor(k)).get();
-      if(!s.exists) return null;
-      const d = s.data() || {};
-      return {key:k, value: typeof d.v==="string" ? d.v : null};
-    },
-    async set(k,v){ await db.doc(pathFor(k)).set({v:String(v)}); },
-    async delete(k){ await db.doc(pathFor(k)).delete(); },
-    async list(){
-      const snap = await db.collection("meses").get();
-      return {keys: snap.docs.map(d=>K_MONTH(d.id))};
-    }
-  };
-}
-/* respaldo: almacenamiento del propio navegador */
-function localStore(){
-  try{
-    const probe = "cuentas:probe";
-    localStorage.setItem(probe,"1"); localStorage.removeItem(probe);
-  }catch(e){ return null; }
-  return {
-    async get(k){ const v=localStorage.getItem(k); return v==null?null:{key:k,value:v}; },
-    async set(k,v){ localStorage.setItem(k,String(v)); },
-    async delete(k){ localStorage.removeItem(k); },
-    async list(prefix){
-      const keys=[];
+/* Almacén con sesión: todo se guarda primero en el dispositivo (por usuario) y se sube a la nube
+   cuando hay conexión. Los cambios sin subir quedan anotados en "pend". */
+function cloudStore(id){
+  const P = "cuentas:u:"+id+":";
+  const PEND = P+"__pending";
+  const ver = {};                 // versión de cada clave, para no perder cambios hechos mientras se sube
+  let pend = {};                  // clave -> "set" | "del"
+  try{ pend = JSON.parse(localStorage.getItem(PEND)||"{}") || {}; }catch(e){ pend = {}; }
+  const savePend = ()=>{ try{ localStorage.setItem(PEND, JSON.stringify(pend)); }catch(e){} };
+  const lsGet = k => { try{ return localStorage.getItem(P+k); }catch(e){ return null; } };
+  const lsSet = (k,v) => localStorage.setItem(P+k, v);
+  const lsDel = k => { try{ localStorage.removeItem(P+k); }catch(e){} };
+  const localKeys = () => {
+    const out=[];
+    try{
       for(let i=0;i<localStorage.length;i++){
         const k=localStorage.key(i);
-        if(k && k.indexOf(prefix)===0) keys.push(k);
+        if(k && k.indexOf(P)===0 && k!==PEND) out.push(k.slice(P.length));
       }
-      return {keys};
+    }catch(e){}
+    return out;
+  };
+  return {
+    kind:"cloud",
+    async get(k){ const v=lsGet(k); return v==null ? null : {key:k, value:v}; },
+    async set(k,v){ lsSet(k,String(v)); pend[k]="set"; ver[k]=(ver[k]||0)+1; savePend(); },
+    async delete(k){ lsDel(k); pend[k]="del"; ver[k]=(ver[k]||0)+1; savePend(); },
+    async list(prefix){ return {keys: localKeys().filter(k=>k.indexOf(prefix)===0)}; },
+    pending(){ return Object.keys(pend).length; },
+    async push(){
+      const keys = Object.keys(pend);
+      if(!keys.length) return;
+      const sent = {}; keys.forEach(k=>{ sent[k]=ver[k]||0; });
+      const up=[], del=[];
+      keys.forEach(k=>{
+        const v = lsGet(k);
+        if(pend[k]==="del" || v==null) del.push(k); else up.push({user_id:id, key:k, value:v});
+      });
+      if(up.length){
+        const r = await sb.from("user_data").upsert(up,{onConflict:"user_id,key"});
+        if(r.error) throw r.error;
+      }
+      if(del.length){
+        const r = await sb.from("user_data").delete().eq("user_id",id).in("key",del);
+        if(r.error) throw r.error;
+      }
+      keys.forEach(k=>{ if((ver[k]||0)===sent[k]) delete pend[k]; });
+      savePend();
+    },
+    async pull(){
+      const r = await sb.from("user_data").select("key,value").eq("user_id",id);
+      if(r.error) throw r.error;
+      let changed = false;
+      const remote = new Set();
+      (r.data||[]).forEach(row=>{
+        remote.add(row.key);
+        if(pend[row.key]) return;                       // hay un cambio local sin subir: manda el local
+        if(lsGet(row.key)!==row.value){ lsSet(row.key,row.value); changed=true; }
+      });
+      localKeys().forEach(k=>{
+        if(!remote.has(k) && !pend[k]){ lsDel(k); changed=true; }   // borrado desde otro dispositivo
+      });
+      return changed;
     }
   };
-}
-async function initStore(){
-  const c = (typeof window!=="undefined") ? window.claude : null;
-  if(c && typeof c.use==="function"){
-    try{
-      const db = await c.use("db");
-      if(db){ store = dbStore(db); storeMode = "db"; return; }
-    }catch(e){}
-  }
-  const ls = localStore();
-  if(ls){ store = ls; storeMode = "local"; return; }
-  store = null; storeMode = "none";
 }
 
 function save(){
@@ -1463,63 +1522,359 @@ async function flush(){
         delete snapshot[k];
       }
     }
-    setSync("ok");
   }catch(e){
     setSync("err");
     toast("No se han podido guardar los cambios. Exporta una copia por si acaso.");
-  }
-}
-
-async function boot(){
-  await initStore();
-  if(!store){
-    loading = false; syncState = "off";
-    applyTheme(); render();
     return;
   }
+  // lo guardado ya está a salvo en el dispositivo; ahora, a la nube
+  if(store.pending() && navigator.onLine===false){ setSync("pending"); return; }
+  try{ await store.push(); setSync("ok"); }
+  catch(e){ setSync(store.pending() ? "pending" : "err"); }
+}
+
+let syncing = false, syncAgain = false;
+async function syncNow(manual){
+  if(!store || !store.push) return;
+  if(syncing){ syncAgain = true; return; }
+  if(saveT) return;                                  // hay un guardado a punto de salir: él subirá los cambios
+  if(navigator.onLine===false){
+    setSync(store.pending() ? "pending" : "offline");
+    if(manual) toast("Sin conexión.");
+    return;
+  }
+  syncing = true;
   try{
-    let raw = null;
-    try{ raw = await store.get(K_SET); }catch(e){ raw = null; }
-    if(raw && raw.value){
-      snapshot[K_SET] = raw.value;
-      try{
-        const p = JSON.parse(raw.value);
-        if(Array.isArray(p.cats) && p.cats.length) S.cats = p.cats;
-        if(Array.isArray(p.rules)) S.rules = p.rules;
-        S.budget = typeof p.budget==="number" ? p.budget : null;
-        S.saveGoal = typeof p.saveGoal==="number" ? p.saveGoal : null;
-        S.theme = p.theme || "auto";
-      }catch(e){}
-    }
-    applyTheme();
-
-    let keys = [];
-    try{
-      const l = await store.list(PREFIX);
-      keys = (l && l.keys) || [];
-    }catch(e){ keys = []; }
-
-    const tx = [];
-    for(const k of keys){
-      try{
-        const r = await store.get(k);
-        if(!r || !r.value) continue;
-        snapshot[k] = r.value;
-        const arr = JSON.parse(r.value);
-        if(Array.isArray(arr)) arr.forEach(t=>{ if(t && t.id && t.date) tx.push(t); });
-      }catch(e){}
-    }
-    S.tx = tx;
-    if(S.tx.length) cursor = S.tx.map(t=>t.date).sort().pop().slice(0,7);
-    loading = false;
-    syncState = "ok";
-    render();
+    setSync("saving");
+    await store.push();
+    if(await store.pull()){ await loadFromStore(false); render(); }
+    setSync("ok");
+    if(manual) toast("Sincronizado");
   }catch(e){
-    loading = false;
-    syncState = "err";
-    applyTheme(); render();
+    setSync(store.pending() ? "pending" : "err");
+    if(manual) toast("No se ha podido sincronizar.");
+  }finally{
+    syncing = false;
+    if(syncAgain){ syncAgain=false; syncNow(); }
   }
 }
+
+/* lee del almacén (dispositivo) y reconstruye el estado de la app */
+async function loadFromStore(first){
+  snapshot = {};
+  const fresh = load();
+  let raw = null;
+  try{ raw = await store.get(K_SET); }catch(e){ raw = null; }
+  if(raw && raw.value){
+    snapshot[K_SET] = raw.value;
+    try{
+      const p = JSON.parse(raw.value);
+      if(Array.isArray(p.cats) && p.cats.length) fresh.cats = p.cats;
+      if(Array.isArray(p.rules)) fresh.rules = p.rules;
+      fresh.budget = typeof p.budget==="number" ? p.budget : null;
+      fresh.saveGoal = typeof p.saveGoal==="number" ? p.saveGoal : null;
+      fresh.theme = p.theme || "auto";
+    }catch(e){}
+  }
+  let keys = [];
+  try{
+    const l = await store.list(PREFIX);
+    keys = (l && l.keys) || [];
+  }catch(e){ keys = []; }
+  const tx = [];
+  for(const k of keys){
+    try{
+      const r = await store.get(k);
+      if(!r || !r.value) continue;
+      snapshot[k] = r.value;
+      const arr = JSON.parse(r.value);
+      if(Array.isArray(arr)) arr.forEach(t=>{ if(t && t.id && t.date) tx.push(t); });
+    }catch(e){}
+  }
+  fresh.tx = tx;
+  S = fresh;
+  applyTheme();
+  if(first && S.tx.length) cursor = S.tx.map(t=>t.date).sort().pop().slice(0,7);
+}
+
+/* ---------- datos de antes de tener cuentas (guardados solo en este dispositivo) ---------- */
+function legacyKeys(){
+  const ks=[];
+  try{
+    for(let i=0;i<localStorage.length;i++){
+      const k=localStorage.key(i);
+      if(k===K_SET || (k && k.indexOf(PREFIX)===0)) ks.push(k);
+    }
+  }catch(e){}
+  return ks;
+}
+async function importLegacy(ks){
+  for(const k of ks){
+    const raw = localStorage.getItem(k);
+    if(raw==null) continue;
+    if(k===K_SET){
+      const cur = await store.get(K_SET);
+      if(!cur) await store.set(K_SET, raw);
+      continue;
+    }
+    let incoming;
+    try{ incoming = JSON.parse(raw); }catch(e){ continue; }
+    if(!Array.isArray(incoming)) continue;
+    const cur = await store.get(k);
+    if(cur && cur.value){
+      try{
+        const have = JSON.parse(cur.value);
+        const ids = new Set(have.map(t=>t.id));
+        incoming = have.concat(incoming.filter(t=>!ids.has(t.id)));
+      }catch(e){}
+    }
+    await store.set(k, JSON.stringify(incoming));
+  }
+  ks.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
+  await loadFromStore(true);
+  render();
+  syncNow();
+}
+function maybeLegacy(){
+  return new Promise(resolve=>{
+    const ks = legacyKeys();
+    if(!ks.length) return resolve();
+    let n = 0;
+    ks.forEach(k=>{ if(k!==K_SET){ try{ n += JSON.parse(localStorage.getItem(k)||"[]").length; }catch(e){} } });
+    const el = document.getElementById("sheet");
+    el.innerHTML = '<div class="sheet-bg"><div class="sheet" role="dialog" aria-modal="true" aria-label="Datos anteriores">'+
+      '<div class="sheet-head"><h2>Datos de antes de las cuentas</h2></div>'+
+      '<p class="note">En este dispositivo hay '+(n?n+' movimientos':'datos')+' guardados de antes de tener cuentas. ¿Quieres subirlos a la cuenta <b>'+esc(userEmail)+'</b>?</p>'+
+      '<button class="btn wide" id="lg-up" style="margin-top:16px">Subir a mi cuenta</button>'+
+      '<button class="btn wide ghost" id="lg-no" style="margin-top:8px">Descartarlos</button>'+
+      '<button class="btn wide ghost" id="lg-later" style="margin-top:8px">Decidir más tarde</button>'+
+    '</div></div>';
+    const close = ()=>{ el.innerHTML=""; resolve(); };
+    document.getElementById("lg-later").onclick = close;
+    document.getElementById("lg-no").onclick = ()=>{
+      ks.forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} });
+      close();
+    };
+    document.getElementById("lg-up").onclick = async ()=>{
+      close();
+      try{ await importLegacy(ks); toast("Datos subidos a tu cuenta"); }
+      catch(e){ toast("No se han podido subir los datos."); }
+    };
+  });
+}
+
+/* ---------- sesión ---------- */
+function offlineUser(){
+  try{
+    const raw = localStorage.getItem(AUTH_KEY);
+    if(!raw) return null;
+    const s = JSON.parse(raw);
+    return (s && s.user && s.user.id) ? s.user : null;
+  }catch(e){ return null; }
+}
+
+async function startSession(user){
+  userId = user.id; userEmail = user.email || "";
+  store = cloudStore(userId); storeMode = "cloud";
+  authState = "in"; authMsg = ""; authBusy = false;
+  loading = true; syncState = "wait";
+  render();
+  await loadFromStore(true);
+  loading = false;
+  render();
+  syncNow();
+  await maybeLegacy();
+}
+
+function endSession(wipe){
+  clearTimeout(saveT); saveT = null;
+  if(wipe && userId){
+    try{
+      const P = "cuentas:u:"+userId+":", del = [];
+      for(let i=0;i<localStorage.length;i++){
+        const k = localStorage.key(i);
+        if(k && k.indexOf(P)===0) del.push(k);
+      }
+      del.forEach(k=>localStorage.removeItem(k));
+    }catch(e){}
+  }
+  userId = null; userEmail = ""; store = null; storeMode = "none"; snapshot = {};
+  S = load(); imp = null; filterCat = ""; search = ""; cursor = ym(new Date()); tab = "resumen"; draft = null;
+  document.getElementById("sheet").innerHTML = "";
+  applyTheme();
+}
+
+async function doLogout(){
+  if(store && store.push){
+    clearTimeout(saveT); saveT = null;
+    try{ await flush(); }catch(e){}
+  }
+  const n = store && store.pending ? store.pending() : 0;
+  const go = async ()=>{
+    endSession(true);
+    try{ if(sb) await sb.auth.signOut({scope:"local"}); }catch(e){}
+    authState = "login"; authMsg = ""; authEmail = "";
+    render();
+  };
+  if(n>0){
+    askConfirm("Hay cambios sin subir",
+      "Tienes "+n+" cambio"+(n===1?"":"s")+" que aún no se han subido a tu cuenta (¿sin conexión?). Si cierras sesión ahora, se perderán en este dispositivo.",
+      "Cerrar sesión y perderlos", go);
+  }else go();
+}
+
+function humanAuthError(e){
+  const m = String((e && e.message) || e || "").toLowerCase();
+  const code = e && e.code;
+  if(navigator.onLine===false || m.indexOf("failed to fetch")>-1 || m.indexOf("network")>-1) return "No hay conexión con el servidor.";
+  if(code==="invalid_credentials" || m.indexOf("invalid login")>-1) return "Correo o contraseña incorrectos.";
+  if(code==="email_not_confirmed" || m.indexOf("not confirmed")>-1) return "Tu correo aún no está confirmado.";
+  if((e && e.status===429) || code==="over_request_rate_limit" || code==="over_email_send_rate_limit" || m.indexOf("rate limit")>-1) return "Demasiados intentos. Espera unos minutos y vuelve a probar.";
+  if(code==="same_password" || m.indexOf("different from the old")>-1) return "La contraseña nueva tiene que ser distinta de la anterior.";
+  if(code==="weak_password" || m.indexOf("weak")>-1) return "Esa contraseña es demasiado débil. Usa al menos 8 caracteres, mejor con letras y números.";
+  return "No se ha podido completar la acción. Inténtalo de nuevo.";
+}
+
+async function doLogin(email, pw){
+  authEmail = email; authMsg = ""; authMsgOk = false;
+  if(!email || !pw){ authMsg = "Escribe tu correo y tu contraseña."; render(); return; }
+  authBusy = true; render();
+  try{
+    const r = await sb.auth.signInWithPassword({email:email, password:pw});
+    if(r.error) throw r.error;
+    // si va bien, onAuthStateChange(SIGNED_IN) arranca la sesión
+  }catch(e){
+    authBusy = false; authMsg = humanAuthError(e); render();
+  }
+}
+
+async function doForgot(email){
+  authEmail = email; authMsg = ""; authMsgOk = false;
+  if(!email){ authMsg = "Escribe tu correo."; render(); return; }
+  authBusy = true; render();
+  try{
+    const r = await sb.auth.resetPasswordForEmail(email,{redirectTo: location.origin+location.pathname});
+    if(r.error) throw r.error;
+    authMsg = "Si ese correo tiene cuenta, te habrá llegado un enlace para crear una contraseña nueva."; authMsgOk = true;
+  }catch(e){ authMsg = humanAuthError(e); }
+  authBusy = false; render();
+}
+
+async function doSetPw(p1, p2){
+  authMsg = ""; authMsgOk = false;
+  if(p1.length<8){ authMsg = "La contraseña debe tener al menos 8 caracteres."; render(); return; }
+  if(p1!==p2){ authMsg = "Las contraseñas no coinciden."; render(); return; }
+  authBusy = true; render();
+  try{
+    const r = await sb.auth.updateUser({password:p1});
+    if(r.error) throw r.error;
+    needPw = false; authBusy = false;
+    try{ history.replaceState(null,"",location.pathname+location.search); }catch(e){}
+    const g = await sb.auth.getSession();
+    if(g.data && g.data.session) await startSession(g.data.session.user);
+    else { authState = "login"; render(); }
+  }catch(e){
+    authBusy = false; authMsg = humanAuthError(e); render();
+  }
+}
+
+async function onAuth(event, session){
+  if(event==="PASSWORD_RECOVERY"){ needPw = true; if(session){ authState = "setpw"; render(); } return; }
+  if(event==="SIGNED_OUT"){
+    if(userId) endSession(false);
+    authState = "login"; render();
+    return;
+  }
+  if(event==="TOKEN_REFRESHED"){ syncNow(); return; }
+  if(event==="INITIAL_SESSION" || event==="SIGNED_IN"){
+    if(session && session.user){
+      if(needPw){ authState = "setpw"; render(); return; }
+      if(userId!==session.user.id) await startSession(session.user);
+      else syncNow();
+    }else if(event==="INITIAL_SESSION"){
+      const u = offlineUser();
+      if(u && navigator.onLine===false) await startSession(u);       // sin conexión: seguimos con la sesión guardada
+      else { authState = hashErr ? "forgot" : "login"; if(hashErr){ authMsg = "El enlace ha caducado o ya se ha usado. Pide uno nuevo."; } render(); }
+    }
+  }
+}
+
+function initAuth(){
+  if(!window.supabase || !window.supabase.createClient){
+    authState = "login"; authMsg = "No se ha podido cargar el servicio de cuentas. Comprueba la conexión y recarga la página.";
+    render();
+    return;
+  }
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true, storageKey:AUTH_KEY }
+  });
+  // no se hacen llamadas a Supabase dentro del callback: se difieren para evitar bloqueos
+  sb.auth.onAuthStateChange((event, session)=>{ setTimeout(()=>{ onAuth(event, session); }, 0); });
+}
+
+function renderAuth(){
+  const el = document.getElementById("auth");
+  const msg = authMsg ? '<p class="note authmsg '+(authMsgOk?"ok":"bad")+'" role="alert">'+esc(authMsg)+'</p>' : "";
+  const dis = authBusy ? " disabled" : "";
+  const emailField = (id)=>'<div class="field"><label class="f" for="'+id+'">Correo</label>'+
+    '<input type="email" id="'+id+'" autocomplete="username" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" value="'+esc(authEmail)+'"></div>';
+  let body = "";
+  if(authState==="loading"){
+    body = '<p class="note" style="text-align:center">Cargando…</p>';
+  }else if(authState==="forgot"){
+    body = '<form id="forgotform" class="card" novalidate>'+
+      '<h2 style="margin:0 0 6px;font-size:17px">Recuperar contraseña</h2>'+
+      '<p class="note" style="margin-bottom:14px">Escribe tu correo y te enviaremos un enlace para crear una contraseña nueva.</p>'+
+      emailField("femail")+msg+
+      '<button class="btn wide" type="submit"'+dis+'>'+(authBusy?"Enviando…":"Enviar enlace")+'</button>'+
+      '<p style="text-align:center;margin:14px 0 0"><button type="button" class="linkbtn" id="tologin">Volver</button></p>'+
+    '</form>';
+  }else if(authState==="setpw"){
+    body = '<form id="setpwform" class="card" novalidate>'+
+      '<h2 style="margin:0 0 6px;font-size:17px">Crea tu contraseña</h2>'+
+      '<p class="note" style="margin-bottom:14px">Elige una contraseña de al menos 8 caracteres. La usarás para entrar.</p>'+
+      '<div class="field"><label class="f" for="np1">Contraseña nueva</label><input type="password" id="np1" autocomplete="new-password"></div>'+
+      '<div class="field"><label class="f" for="np2">Repítela</label><input type="password" id="np2" autocomplete="new-password"></div>'+
+      msg+
+      '<button class="btn wide" type="submit"'+dis+'>'+(authBusy?"Guardando…":"Guardar contraseña")+'</button>'+
+    '</form>';
+  }else{
+    body = '<form id="loginform" class="card" novalidate>'+
+      '<h2 style="margin:0 0 14px;font-size:17px">Entrar</h2>'+
+      emailField("lemail")+
+      '<div class="field"><label class="f" for="lpw">Contraseña</label><input type="password" id="lpw" autocomplete="current-password"></div>'+
+      msg+
+      '<button class="btn wide" type="submit"'+dis+'>'+(authBusy?"Entrando…":"Entrar")+'</button>'+
+      '<p style="text-align:center;margin:14px 0 0"><button type="button" class="linkbtn" id="toforgot">¿Has olvidado la contraseña?</button></p>'+
+    '</form>'+
+    '<p class="note" style="text-align:center;margin-top:16px">El acceso es solo por invitación. Si necesitas una cuenta, pídesela a quien administra la app.</p>';
+  }
+  el.innerHTML = '<div class="authbox"><h1 class="authtitle">Cuentas</h1>'+body+'</div>';
+
+  const $ = id => document.getElementById(id);
+  const val = id => { const n=$(id); return n ? n.value : ""; };
+  if($("loginform")) $("loginform").onsubmit = e=>{ e.preventDefault(); doLogin(val("lemail").trim(), val("lpw")); };
+  if($("forgotform")) $("forgotform").onsubmit = e=>{ e.preventDefault(); doForgot(val("femail").trim()); };
+  if($("setpwform")) $("setpwform").onsubmit = e=>{ e.preventDefault(); doSetPw(val("np1"), val("np2")); };
+  if($("toforgot")) $("toforgot").onclick = ()=>{ authEmail = val("lemail").trim(); authMsg = ""; authState = "forgot"; render(); };
+  if($("tologin")) $("tologin").onclick = ()=>{ authEmail = val("femail").trim(); authMsg = ""; authState = "login"; render(); };
+}
+
+function boot(){
+  initAuth();
+  // por si la comprobación de sesión no llegara a responder
+  setTimeout(()=>{ if(authState==="loading"){ authState = "login"; render(); } }, 8000);
+}
+
+window.addEventListener("online", ()=>{ syncNow(); });
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="hidden"){
+    // al salir de la app (iOS), guardar ya sin esperar al temporizador
+    if(saveT){ clearTimeout(saveT); saveT = null; flush(); }
+  }else{
+    syncNow();
+  }
+});
 
 applyTheme();
 render();

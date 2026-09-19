@@ -1,25 +1,38 @@
-# Cuentas (PWA)
+# Cuentas (PWA con cuentas de usuario)
 
-App de gastos que se instala en el iPhone desde Safari y funciona sin conexión.
+App de gastos que se instala en el iPhone desde Safari, funciona sin conexión y guarda los datos
+de cada persona en su propia cuenta (Supabase).
 
-## Probar en local (Mac)
-    cd ~/cuentas-pwa && python3 -m http.server 8000
-    # abre http://localhost:8000
+## Configurar Supabase (una sola vez)
 
-## Publicar gratis (GitHub Pages)
-1. Crea un repositorio en GitHub y sube el contenido de esta carpeta.
-2. Settings → Pages → Deploy from a branch → `main` / root.
-3. Tu app quedará en `https://TU-USUARIO.github.io/NOMBRE-REPO/`.
-   (Las PWA exigen HTTPS; GitHub Pages ya lo incluye.)
+1. **Tabla y seguridad:** Supabase → *SQL Editor* → *New query* → pega todo `supabase/schema.sql` → *Run*.
+   Crea la tabla `user_data` con seguridad por filas (cada persona solo ve lo suyo) y sin acceso para `anon`.
+2. **Cerrar el registro:** *Authentication* → *Sign In / Providers* → desactiva **"Allow new users to sign up"**.
+   Así solo entran las personas que tú crees.
+3. **Direcciones:** *Authentication* → *URL Configuration*:
+   - Site URL: `https://pepect.github.io/cuentas/`
+   - Redirect URLs: `https://pepect.github.io/cuentas/`
+4. **Crear a tu familia:** *Authentication* → *Users* → *Add user* → *Create new user*.
+   Pon el correo y una contraseña, y marca **Auto Confirm User**. Pásales la contraseña por un canal privado;
+   cada persona puede cambiarla con "¿Has olvidado la contraseña?".
+
+## Publicar (GitHub Pages)
+Sube el contenido de esta carpeta al repositorio (arrastrando los archivos en la web de GitHub).
+Cada vez que cambies archivos, sube también `VERSION` en `sw.js` (p. ej. `cuentas-v3`);
+si no, los móviles pueden seguir viendo la copia guardada.
 
 ## Instalar en el iPhone
 Abre la URL en **Safari** → Compartir → **Añadir a pantalla de inicio**.
-(Tiene que ser Safari; desde Chrome en iOS no se instala como app.)
 
-## Actualizar la app
-Cambia lo que quieras, sube `VERSION` en `sw.js` (p. ej. `cuentas-v2`) y vuelve a publicar.
-Sin subir `VERSION`, los móviles pueden seguir viendo la copia guardada.
+## Cómo funcionan los datos
+- Todo se guarda primero en el dispositivo y se sube a la nube cuando hay conexión.
+- Sin conexión la app sigue funcionando; los cambios quedan pendientes y se suben solos al volver la red.
+- Si la misma cuenta se edita en dos dispositivos a la vez, gana el último cambio de cada mes.
+- Al **cerrar sesión** se borra la copia local de ese usuario en ese dispositivo.
+- **Ajustes → Exportar copia** hace un respaldo en un archivo `.json`.
 
-## Datos
-Ahora se guardan en el propio dispositivo (localStorage). Ajustes → Exportar copia hace un respaldo.
-En la Fase 2 pasarán a la nube con inicio de sesión (Supabase).
+## Seguridad
+- La clave que hay en `index.html` es la pública (`anon`). No es secreta; la protección son las reglas
+  de `schema.sql`. **Nunca pongas la clave `service_role` en este proyecto.**
+- La política de seguridad del navegador (CSP) solo permite conectar con este servidor y con Supabase.
+- La librería de Supabase incluida en `vendor/` (versión fija), sin cargar código de terceros en tiempo de ejecución.

@@ -1,9 +1,10 @@
 /* Service worker de Cuentas: la app funciona sin conexión.
    Sube VERSION cada vez que cambies archivos de la app para que los móviles se actualicen. */
-const VERSION = "cuentas-v1";
+const VERSION = "cuentas-v2";
 const SHELL = [
   "./",
   "index.html",
+  "vendor/supabase-2.116.0.js",
   "manifest.webmanifest",
   "icons/icon-192.png",
   "icons/icon-512.png",
