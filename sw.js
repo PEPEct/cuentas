@@ -1,6 +1,6 @@
 /* Service worker de Cuentas: la app funciona sin conexión.
    Sube VERSION cada vez que cambies archivos de la app para que los móviles se actualicen. */
-const VERSION = "cuentas-v2";
+const VERSION = "cuentas-v3";
 const SHELL = [
   "./",
   "index.html",
@@ -16,7 +16,12 @@ const SHELL = [
 ];
 
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache:"reload" evita que el navegador nos dé copias antiguas de su propia caché HTTP
+  e.waitUntil(
+    caches.open(VERSION)
+      .then(c => c.addAll(SHELL.map(u => new Request(u, {cache: "reload"}))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener("activate", e => {
@@ -37,7 +42,7 @@ self.addEventListener("fetch", e => {
   // Páginas: primero la red (para recibir actualizaciones) y, sin conexión, la copia guardada.
   if (req.mode === "navigate") {
     e.respondWith(
-      fetch(req)
+      fetch(req, {cache: "no-cache"})
         .then(res => { const copy = res.clone(); caches.open(VERSION).then(c => c.put("index.html", copy)); return res; })
         .catch(() => caches.match("index.html"))
     );

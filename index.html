@@ -287,6 +287,15 @@ tr:last-child td{border-bottom:0}
 .authmsg{margin:0 0 12px}
 .authmsg.bad{color:var(--danger)}
 .authmsg.ok{color:var(--good)}
+.cbrow{display:grid;grid-template-columns:10px 1fr 130px;gap:10px;align-items:center;padding:6px 0}
+.cbrow .dot{width:10px;height:10px;border-radius:3px}
+.cbrow .cbname{font-size:15px}
+.cbtrack{height:5px;border-radius:3px;background:var(--card-2);overflow:hidden;margin:7px 0 0 17px}
+.cbtrack i{display:block;height:100%}
+.updatebar{position:fixed;left:16px;right:16px;top:calc(10px + env(safe-area-inset-top));max-width:520px;margin:0 auto;z-index:90;
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  background:var(--ink);color:var(--paper);padding:10px 12px 10px 16px;border-radius:12px;font-size:14px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+.updatebar .btn{background:var(--paper);color:var(--ink);flex:none}
 .hidden{display:none !important}
 </style>
 </head>
@@ -313,6 +322,7 @@ tr:last-child td{border-bottom:0}
 <button class="fab hidden" id="fab">+ Gasto</button>
 <div id="sheet"></div>
 <div id="toast"></div>
+<div id="updatebar" class="updatebar hidden" role="status"><span>Hay una versión nueva de Cuentas.</span><button class="btn sm" id="updatebtn" type="button">Actualizar</button></div>
 
 <script src="vendor/supabase-2.116.0.js"></script>
 <script>
@@ -370,7 +380,7 @@ let search = "";
 let imp = null;
 
 function load(){
-  return {tx:[], cats:DEFAULT_CATS.slice(), rules:DEFAULT_RULES.slice(), budget:null, saveGoal:null, theme:"auto"};
+  return {tx:[], cats:DEFAULT_CATS.slice(), rules:DEFAULT_RULES.slice(), budget:null, catBudgets:{}, saveGoal:null, theme:"auto"};
 }
 /* save() vive en el bloque de almacenamiento, al final */
 
@@ -547,6 +557,25 @@ function viewResumen(){
   });
   cats += '</ul>';
 
+  // presupuestos por categoría
+  let cbBlock = "";
+  const cbIds = S.cats.map(c=>c.id).filter(id=>(S.catBudgets||{})[id]>0);
+  if(cbIds.length){
+    const items = cbIds.map(id=>{ const b=S.catBudgets[id], v=byCat[id]||0; return {id, b, v, r:v/b}; }).sort((x,y)=>y.r-x.r);
+    cbBlock = '<p class="section-h">Presupuestos por categoría</p><div class="card"><ul class="cmplist">';
+    items.forEach(it=>{
+      const over = it.v>it.b, warn = !over && it.r>=0.8;
+      const col = over ? "var(--danger)" : warn ? "var(--c6)" : "var(--accent)";
+      const msg = over ? "te pasas "+money(it.v-it.b) : "quedan "+money(it.b-it.v);
+      cbBlock += '<li><div class="cmp-top"><span class="dot" style="background:var('+cat(it.id).color+')"></span>'+
+        '<span class="name">'+esc(cat(it.id).name)+'</span>'+
+        '<span class="chg num" style="color:'+(over?"var(--danger)":"var(--ink-3)")+'">'+Math.round(it.r*100)+'%</span></div>'+
+        '<div class="cbtrack"><i style="width:'+Math.min(100,it.r*100)+'%;background:'+col+'"></i></div>'+
+        '<div class="cmp-nums"><span class="cur num">'+money(it.v)+'</span> de <span class="num">'+money(it.b)+'</span> · '+msg+'</div></li>';
+    });
+    cbBlock += '</ul></div>';
+  }
+
   // tendencia 6 meses
   const ms=[]; for(let i=5;i>=0;i--) ms.push(shiftMonth(cursor,-i));
   const vals = ms.map(spentIn);
@@ -584,6 +613,7 @@ function viewResumen(){
     '</div></div>'+
     (rows.length?stack:'')+budget+
     (rows.length?cats:'<div class="card empty"><p>Sin gastos este mes.</p></div>')+
+    cbBlock+
     '<p class="section-h">Últimos 6 meses</p>'+trend+yearBlock()+tops;
 }
 
@@ -675,6 +705,11 @@ function buildTips(){
   const byCat = {};
   txOf(cur).filter(t=>t.amount<0).forEach(t=>{ byCat[t.cat]=(byCat[t.cat]||0)+(-t.amount); });
   const rows = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+
+  Object.keys(S.catBudgets||{}).forEach(id=>{
+    const b = S.catBudgets[id], v = byCat[id]||0;
+    if(b>0 && v>b) tips.unshift({ico:"🚨", tt:cat(id).name+": te has pasado del presupuesto", tx:"Llevas "+money(v)+" de "+money(b)+" este mes ("+money(v-b)+" de más). "+categoryAdvice(id)});
+  });
 
   if(rows.length){
     const [topId,topV] = rows[0];
@@ -929,6 +964,7 @@ function viewAjustes(){
       '<button class="btn sm ghost" id="syncnow">Sincronizar ahora</button>'+
       '<button class="btn sm ghost" id="logout">Cerrar sesión</button>'+
     '</div>'+
+    '<p class="note" style="margin:12px 0 0;color:var(--ink-3)">Cuentas · versión '+APP_VERSION+'</p>'+
   '</div>'+
 
   '<div class="card" style="margin-top:14px">'+
@@ -936,6 +972,16 @@ function viewAjustes(){
     '<div style="display:flex;gap:10px"><input type="number" id="budget" inputmode="decimal" placeholder="Sin límite" value="'+(S.budget||"")+'" style="flex:1">'+
     '<button class="btn" id="savebudget">Guardar</button></div>'+
     '<p class="note" style="margin-top:8px">Aparece como barra de progreso en el resumen.</p>'+
+  '</div>'+
+
+  '<div class="card" style="margin-top:14px">'+
+    '<h2 style="margin:0 0 6px;font-size:17px">Presupuesto por categoría</h2>'+
+    '<p class="note">Un límite mensual para cada categoría. Déjalo vacío si no quieres límite. Se muestra con barras de progreso en el resumen.</p>'+
+    '<div style="margin-top:10px">'+
+      S.cats.map(c=>'<div class="cbrow"><span class="dot" style="background:var('+c.color+')"></span><label class="cbname" for="cb-'+esc(c.id)+'">'+esc(c.name)+'</label>'+
+        '<input type="number" id="cb-'+esc(c.id)+'" inputmode="decimal" min="0" step="1" data-cb="'+esc(c.id)+'" placeholder="Sin límite" value="'+((S.catBudgets||{})[c.id]||"")+'"></div>').join("")+
+    '</div>'+
+    '<button class="btn wide" id="savecb" style="margin-top:12px">Guardar presupuestos</button>'+
   '</div>'+
 
   '<div class="card" style="margin-top:14px">'+
@@ -1040,12 +1086,62 @@ function saveTx(){
     cat: draft.cat,
     src: "manual"
   };
+  const orig = draft.id ? S.tx.find(t=>t.id===draft.id) : null;
+  const catChanged = !!(orig && orig.cat!==rec.cat);
   if(draft.id){ S.tx = S.tx.map(t=>t.id===draft.id?rec:t); }
   else S.tx.push(rec);
   save();
   cursor = rec.date.slice(0,7);
   closeSheet(); render();
   toast("Guardado");
+  // si cambió la categoría y ninguna regla lo explica, ofrecer recordarlo
+  if(catChanged && classify(rec.desc)!==rec.cat) askLearnRule(rec);
+}
+
+/* ---------- aprender reglas al recategorizar ---------- */
+const GENERIC_WORDS = new Set(["COMPRA","COMPRAS","PAGO","PAGOS","TARJ","TARJETA","RECIBO","TRANSFERENCIA","TRANSF","BIZUM","ADEUDO","CARGO","COBRO","TPV","POS","PAG","DOMICILIACION","DOMICILIADO","REF","OPERACION","DEL","LAS","LOS","CON"]);
+function suggestKeyword(desc){
+  const toks = norm(desc).replace(/[^A-Z0-9ÁÉÍÓÚÜÑ&\s]/g," ").split(" ")
+    .filter(t=>t.length>=3 && !/\d/.test(t) && !GENERIC_WORDS.has(t));
+  const kw = toks.slice(0,2).join(" ").trim();
+  return kw.length>=3 ? kw : norm(desc).slice(0,20).trim();
+}
+function askLearnRule(rec){
+  const el = document.getElementById("sheet");
+  el.innerHTML = '<div class="sheet-bg" id="lbg"><div class="sheet" role="dialog" aria-modal="true" aria-label="Recordar categoría">'+
+    '<div class="sheet-head"><h2>¿Recordar esta categoría?</h2><button class="x" id="lx" aria-label="Cerrar">✕</button></div>'+
+    '<p class="note">Has puesto «'+esc(rec.desc)+'» en <b>'+esc(cat(rec.cat).name)+'</b>. Los movimientos cuyo concepto contenga este texto irán siempre a esa categoría:</p>'+
+    '<div class="field" style="margin-top:12px"><label class="f" for="lkw">Texto a buscar</label>'+
+    '<input type="text" id="lkw" value="'+esc(suggestKeyword(rec.desc))+'" autocapitalize="characters" autocorrect="off" spellcheck="false"></div>'+
+    '<p class="note" id="lcount"></p>'+
+    '<button class="btn wide" id="lok" style="margin-top:14px">Crear regla</button>'+
+    '<button class="btn wide ghost" id="lno" style="margin-top:8px">Solo este movimiento</button>'+
+  '</div></div>';
+  const close = ()=>{ el.innerHTML=""; };
+  const kwVal = ()=>norm(document.getElementById("lkw").value);
+  const others = k=>S.tx.filter(t=>t.id!==rec.id && norm(t.desc).indexOf(k)>-1).length;
+  const upd = ()=>{
+    const k = kwVal();
+    document.getElementById("lcount").textContent = k.length<3 ? "Escribe al menos 3 letras." :
+      (others(k) ? "Se aplicará también a "+others(k)+" movimiento"+(others(k)===1?"":"s")+" más." : "No hay más movimientos con ese texto por ahora.");
+  };
+  upd();
+  document.getElementById("lkw").oninput = upd;
+  document.getElementById("lx").onclick = close;
+  document.getElementById("lno").onclick = close;
+  document.getElementById("lbg").onclick = e=>{ if(e.target.id==="lbg") close(); };
+  document.getElementById("lok").onclick = ()=>{
+    const k = kwVal();
+    if(k.length<3){ toast("Escribe al menos 3 letras."); return; }
+    S.rules = S.rules.filter(r=>norm(r.kw)!==k);
+    S.rules.unshift({kw:k, cat:rec.cat});
+    let n = 0;
+    S.tx.forEach(t=>{
+      if(t.id!==rec.id && norm(t.desc).indexOf(k)>-1){ const c = classify(t.desc); if(c!==t.cat){ t.cat=c; n++; } }
+    });
+    close(); save(); render();
+    toast("Regla creada"+(n ? " · "+n+" movimiento"+(n===1?"":"s")+" actualizado"+(n===1?"":"s") : ""));
+  };
 }
 
 /* ---------- CSV ---------- */
@@ -1287,6 +1383,16 @@ function wire(){
     const v=parseFloat(document.getElementById("budget").value.replace(",","."));
     S.budget = isNaN(v)||v<=0 ? null : v; save(); toast(S.budget?"Límite guardado":"Límite quitado");
   };
+  const scb=document.getElementById("savecb");
+  if(scb) scb.onclick=()=>{
+    const nb={};
+    document.querySelectorAll("[data-cb]").forEach(i=>{
+      const v=parseFloat(String(i.value).replace(",","."));
+      if(!isNaN(v) && v>0) nb[i.dataset.cb]=v;
+    });
+    S.catBudgets=nb; save(); render();
+    toast(Object.keys(nb).length ? "Presupuestos guardados" : "Presupuestos quitados");
+  };
   const sg=document.getElementById("savesavegoal");
   if(sg) sg.onclick=()=>{
     const v=parseFloat(document.getElementById("savegoal").value.replace(",","."));
@@ -1352,7 +1458,7 @@ function wire(){
     "Sí, borrar todo",
     async ()=>{
       const theme=S.theme;
-      S={tx:[],cats:DEFAULT_CATS.slice(),rules:DEFAULT_RULES.slice(),budget:null,theme};
+      S=Object.assign(load(),{theme});
       imp=null; filterCat=""; search=""; cursor=ym(new Date());
       render();
       await wipeAll();
@@ -1383,6 +1489,7 @@ const SUPABASE_URL = "https://itvycmjexbabhvzqltdo.supabase.co";
 /* Clave pública (anon). No es un secreto: la protección real son las reglas RLS de la base de datos. */
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml0dnljbWpleGJhYmh2enFsdGRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4MjkyMTIsImV4cCI6MjEwNTQwNTIxMn0.-2zJGyN0JuOtCib5YscryfDquToDFzcrnxpzKvJHujE";
 const AUTH_KEY = "cuentas-auth";
+const APP_VERSION = "3";     // súbela a la vez que VERSION en sw.js
 
 const SYNC_LABEL = {
   wait:"Cargando…",
@@ -1503,7 +1610,7 @@ function save(){
 async function flush(){
   if(!store) return;
   try{
-    const st = JSON.stringify({cats:S.cats, rules:S.rules, budget:S.budget, saveGoal:S.saveGoal, theme:S.theme});
+    const st = JSON.stringify({cats:S.cats, rules:S.rules, budget:S.budget, catBudgets:S.catBudgets||{}, saveGoal:S.saveGoal, theme:S.theme});
     if(snapshot[K_SET] !== st){
       await store.set(K_SET, st);
       snapshot[K_SET] = st;
@@ -1573,6 +1680,9 @@ async function loadFromStore(first){
       if(Array.isArray(p.rules)) fresh.rules = p.rules;
       fresh.budget = typeof p.budget==="number" ? p.budget : null;
       fresh.saveGoal = typeof p.saveGoal==="number" ? p.saveGoal : null;
+      if(p.catBudgets && typeof p.catBudgets==="object"){
+        Object.keys(p.catBudgets).forEach(id=>{ const n=p.catBudgets[id]; if(typeof n==="number" && n>0) fresh.catBudgets[id]=n; });
+      }
       fresh.theme = p.theme || "auto";
     }catch(e){}
   }
@@ -1883,7 +1993,23 @@ boot();
 /* ---------- PWA: almacenamiento persistente y modo sin conexión ---------- */
 try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>{ navigator.serviceWorker.register("sw.js").catch(()=>{}); });
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener("controllerchange", ()=>{
+    if(!hadController){ hadController = true; return; }      // primera instalación: no hay nada que actualizar
+    document.getElementById("updatebar").classList.remove("hidden");
+  });
+  window.addEventListener("load", ()=>{
+    navigator.serviceWorker.register("sw.js").then(reg=>{
+      // al volver a la app, comprobar si hay una versión nueva
+      document.addEventListener("visibilitychange", ()=>{
+        if(document.visibilityState==="visible") reg.update().catch(()=>{});
+      });
+    }).catch(()=>{});
+  });
+  document.getElementById("updatebtn").onclick = async ()=>{
+    try{ if(saveT){ clearTimeout(saveT); saveT = null; await flush(); } }catch(e){}
+    location.reload();
+  };
 }
 </script>
 </body>
