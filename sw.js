@@ -1,6 +1,6 @@
 /* Service worker de Cuentas: la app funciona sin conexión.
    Sube VERSION cada vez que cambies archivos de la app para que los móviles se actualicen. */
-const VERSION = "cuentas-v3";
+const VERSION = "cuentas-v4";
 const SHELL = [
   "./",
   "index.html",
